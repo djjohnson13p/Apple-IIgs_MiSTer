@@ -1,0 +1,195 @@
+#!/bin/bash
+# This will run the vsim and snapshot known working hard disks and compare the images
+
+# Required disk images -- SINGLE SOURCE OF TRUTH. Every disk any test below
+# mounts must be listed here (keep in sync when adding a test). The existence
+# check and the error message both derive from this list, so they can't drift.
+REQUIRED_DISKS=(
+    totalreplay.hdv
+    Pitch-Dark-20210331.hdv
+    gsos.hdv
+    arkanoid.hdv
+    "Total Replay II v1.0-alpha.4.hdv"
+    ../customtests/mmu_test.2mg
+    "Arkanoid IIgs.woz"
+    A2DeskTop-1.2-alpha42-en_800k.hdv
+)
+
+MISSING_DISKS=0
+for disk in "${REQUIRED_DISKS[@]}"; do
+    if [ ! -f "$disk" ]; then
+        echo "ERROR: Missing disk image: $disk"
+        MISSING_DISKS=1
+    fi
+done
+
+if [ $MISSING_DISKS -eq 1 ]; then
+    echo ""
+    echo "Please ensure ALL required disk images are present (run from the vsim directory):"
+    for disk in "${REQUIRED_DISKS[@]}"; do
+        echo "  - $disk"
+    done
+    exit 1
+fi
+
+# Check for Vemu binary
+if [ ! -f "./obj_dir/Vemu" ]; then
+    echo "ERROR: Vemu binary not found. Run 'make' first."
+    exit 1
+fi
+
+# Run regression tests
+FAILED=0
+
+echo "Running Total Replay test..."
+# Frame 130: game browser menu (boot guard). Keys P,R type-ahead to Prince of
+# Persia; frame 300: its double-hires title preview (DHR rendering guard --
+# currently mono, reference to be re-blessed when 16-color DHR lands).
+./obj_dir/Vemu --disk totalreplay.hdv --send-keys 130:P --send-keys 150:R --stop-at-frame 300 --screenshot 130,300 &> totalreplay.txt
+if [ -f "regression_images/totalreplay_screenshot_frame_0130.png" ] && [ -f "regression_images/totalreplay_screenshot_frame_0300.png" ]; then
+    if diff screenshot_frame_0130.png regression_images/totalreplay_screenshot_frame_0130.png > /dev/null 2>&1 && \
+       diff screenshot_frame_0300.png regression_images/totalreplay_screenshot_frame_0300.png > /dev/null 2>&1; then
+        echo "  PASS: Total Replay (menu + PoP DHR preview)"
+    else
+        echo "  FAIL: Total Replay - screenshot differs"
+        FAILED=1
+    fi
+else
+    echo "  SKIP: Total Replay - missing reference image"
+fi
+
+echo "Running A2Desktop mouse test..."
+# Mouse regression guard: inject mouse movement on the A2Desktop desktop (which
+# reads the ADB mouse via the direct $C024 register path) and confirm the
+# cursor actually moves. Guards the ADB mouse-delivery path against regressions.
+# (Note: GEOS uses a different ADB autopoll path that is not yet supported.)
+./obj_dir/Vemu --disk A2DeskTop-1.2-alpha42-en_800k.hdv --fixed-time --send-mouse 455:70,50 --send-mouse 460:70,50 --send-mouse 465:70,50 --send-mouse 470:70,50 --stop-at-frame 480 --screenshot 480 &> a2desktop_mouse.txt
+if [ -f "regression_images/a2desktop_mouse_screenshot_frame_0480.png" ]; then
+    if diff screenshot_frame_0480.png regression_images/a2desktop_mouse_screenshot_frame_0480.png > /dev/null 2>&1; then
+        echo "  PASS: A2Desktop mouse (cursor moves on ADB inject)"
+    else
+        echo "  FAIL: A2Desktop mouse - screenshot differs"
+        FAILED=1
+    fi
+else
+    echo "  SKIP: A2Desktop mouse - missing reference image"
+fi
+
+echo "Running A2Desktop test..."
+# DHR (double hi-res) rendering guard, mono/UI flavor -- companion to the
+# Total Replay PoP color-DHR guard: these two must BOTH pass whenever the
+# DHR pipeline changes (the A2Desktop raw-render fix silently traded away
+# PoP's color because only a menu frame was guarded at the time).
+./obj_dir/Vemu --disk A2DeskTop-1.2-alpha42-en_800k.hdv --fixed-time --stop-at-frame 450 --screenshot 450 &> a2desktop.txt
+if [ -f "regression_images/a2desktop_screenshot_frame_0450.png" ]; then
+    if diff screenshot_frame_0450.png regression_images/a2desktop_screenshot_frame_0450.png > /dev/null 2>&1; then
+        echo "  PASS: A2Desktop (DHR desktop)"
+    else
+        echo "  FAIL: A2Desktop - screenshot differs"
+        FAILED=1
+    fi
+else
+    echo "  SKIP: A2Desktop - missing reference image"
+fi
+
+echo "Running Pitch Dark test..."
+./obj_dir/Vemu --disk Pitch-Dark-20210331.hdv --stop-at-frame 159 --screenshot 159 &> pitchdark.txt
+if [ -f "regression_images/pitchdark_screenshot_frame_0159.png" ]; then
+    if diff screenshot_frame_0159.png regression_images/pitchdark_screenshot_frame_0159.png > /dev/null 2>&1; then
+        echo "  PASS: Pitch Dark"
+    else
+        echo "  FAIL: Pitch Dark - screenshot differs"
+        FAILED=1
+    fi
+else
+    echo "  SKIP: Pitch Dark - missing reference image"
+fi
+
+echo "Running GS/OS test..."
+# --fixed-time: GS/OS boot progress depends on the RTC; without it the progress
+# bar at frame 320 jitters by one tick run-to-run and the pixel diff is flaky.
+./obj_dir/Vemu --disk gsos.hdv --fixed-time --stop-at-frame 320 --screenshot 320 &> gsos.txt
+if [ -f "regression_images/gsos_screenshot_frame_0320.png" ]; then
+    if diff screenshot_frame_0320.png regression_images/gsos_screenshot_frame_0320.png > /dev/null 2>&1; then
+        echo "  PASS: GS/OS"
+    else
+        echo "  FAIL: GS/OS - screenshot differs"
+        FAILED=1
+    fi
+else
+    echo "  SKIP: GS/OS - missing reference image"
+fi
+
+echo "Running Arkanoid test..."
+./obj_dir/Vemu --disk arkanoid.hdv --stop-at-frame 485 --screenshot 485 &> arkanoid.txt
+if [ -f "regression_images/arkanoid_screenshot_frame_0485.png" ]; then
+    if diff screenshot_frame_0485.png regression_images/arkanoid_screenshot_frame_0485.png > /dev/null 2>&1; then
+        echo "  PASS: Arkanoid"
+    else
+        echo "  FAIL: Arkanoid - screenshot differs"
+        FAILED=1
+    fi
+else
+    echo "  SKIP: Arkanoid - missing reference image"
+fi
+
+echo "Running Total Replay II test..."
+./obj_dir/Vemu --disk "Total Replay II v1.0-alpha.4.hdv" --stop-at-frame 156 --screenshot 156 &> totalreplay2.txt
+if [ -f "regression_images/totalreplay2_screenshot_frame_0156.png" ]; then
+    if diff screenshot_frame_0156.png regression_images/totalreplay2_screenshot_frame_0156.png > /dev/null 2>&1; then
+        echo "  PASS: Total Replay II"
+    else
+        echo "  FAIL: Total Replay II - screenshot differs"
+        FAILED=1
+    fi
+else
+    echo "  SKIP: Total Replay II - missing reference image"
+fi
+
+echo "Running BASIC boot (reset) test..."
+./obj_dir/Vemu --reset-at-frame 240 --stop-at-frame 295 --screenshot 295 &> basic_boot.txt
+if [ -f "regression_images/basic_boot_screenshot_frame_0295.png" ]; then
+    if diff screenshot_frame_0295.png regression_images/basic_boot_screenshot_frame_0295.png > /dev/null 2>&1; then
+        echo "  PASS: BASIC boot"
+    else
+        echo "  FAIL: BASIC boot - screenshot differs"
+        FAILED=1
+    fi
+else
+    echo "  SKIP: BASIC boot - missing reference image"
+fi
+
+echo "Running MMU test..."
+./obj_dir/Vemu --disk ../customtests/mmu_test.2mg --stop-at-frame 130 --screenshot 130 &> mmutest.txt
+if [ -f "regression_images/mmutest_screenshot_frame_0130.png" ]; then
+    if diff screenshot_frame_0130.png regression_images/mmutest_screenshot_frame_0130.png > /dev/null 2>&1; then
+        echo "  PASS: MMU test"
+    else
+        echo "  FAIL: MMU test - screenshot differs"
+        FAILED=1
+    fi
+else
+    echo "  SKIP: MMU test - missing reference image"
+fi
+
+echo "Running WOZ 3.5\" Arkanoid IIgs test..."
+./obj_dir/Vemu --woz "Arkanoid IIgs.woz" --stop-at-frame 525 --screenshot 525 &> woz35_arkanoid.txt
+if [ -f "regression_images/woz35_screenshot_frame_0525.png" ]; then
+    if diff screenshot_frame_0525.png regression_images/woz35_screenshot_frame_0525.png > /dev/null 2>&1; then
+        echo "  PASS: WOZ 3.5\" Arkanoid IIgs"
+    else
+        echo "  FAIL: WOZ 3.5\" Arkanoid IIgs - screenshot differs"
+        FAILED=1
+    fi
+else
+    echo "  SKIP: WOZ 3.5\" Arkanoid IIgs - missing reference image"
+fi
+
+echo ""
+if [ $FAILED -eq 0 ]; then
+    echo "All regression tests passed!"
+    exit 0
+else
+    echo "Some regression tests failed."
+    exit 1
+fi

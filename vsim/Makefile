@@ -1,0 +1,185 @@
+V = verilator
+COSIM = n
+
+TOP = --top-module emu
+RTL = ../rtl
+V_INC = +incdir+$(RTL)
+
+# ROM selection is runtime, not build-time: both ROM3 and ROM1 are compiled in
+# and chosen at run time with `./obj_dir/Vemu --rom 3|1`. (There is no ROM= make
+# variable; a stray `make ROM=rom1` is silently ignored.)
+
+V_DEFINE = +define+SIMULATION=1   -CFLAGS "-I../sim/imgui -I../sim/vinc -I../sim/ -g "  --timescale-override 1ps/1ps -Wno-TIMESCALEMOD -Wno-fatal \
+	-I$(RTL)  \
+	-I$(RTL)/65C816  \
+	-I..
+#V_DEFINE += --converge-limit 2000 -Wno-WIDTH -Wno-IMPLICIT -Wno-MODDUP -Wno-UNSIGNED -Wno-CASEINCOMPLETE -Wno-CASEX -Wno-SYMRSVDWORD -Wno-COMBDLY -Wno-INITIALDLY -Wno-BLKANDNBLK -Wno-UNOPTFLAT -Wno-SELRANGE -Wno-CMPCONST -Wno-CASEOVERLAP -Wno-PINMISSING -Wno-MULTIDRIVEN
+#V_DEFINE += --threads 8  # this slows it way down
+# VCD trace support: adds ~20% runtime overhead even when not dumping. Opt in
+# with `make TRACE=1` when you need --dump-vcd-after.
+ifeq ($(TRACE),1)
+V_DEFINE += --trace
+CXX_DEFINE += -DVM_TRACE_VCD=1
+else
+CXX_DEFINE += -DVM_TRACE_VCD=0
+endif
+# Sound implementation switch:
+#   make SOUND=stub   -> builds with +define+SOUND_STUB
+#   make SOUND=doc    -> builds full ES5503 path (default)
+ifeq ($(SOUND),stub)
+V_DEFINE += +define+SOUND_STUB
+endif
+V_DEFINE +=
+
+# Faithful dual-clock sim: `make FAITHFUL=1` drives video on a real 28.6MHz
+# clk_vid (2x the 14.3MHz CPU clock) with ce_pix gating, reproducing the
+# hardware CPU<->video phase (see doc/core-timing-plan.md). Default off (FASTSIM).
+ifeq ($(FAITHFUL),1)
+V_DEFINE += +define+FAITHFUL_CLOCK
+endif
+
+# True dual-rate sim: `make DUALRATE=1` drives clk_vid_ext at 28.6MHz from sim_main
+# (2x the 14.3MHz CPU/memory clock, one extra eval per CPU half-cycle) so the VGC's
+# text-page BRAM read is separated in time from the CPU write -- fixing the
+# collapsed-clock beam-race streak (textfunk). Sets both the RTL define and a
+# C++ define so sim_main double-evals with clk_vid toggling.
+ifeq ($(DUALRATE),1)
+V_DEFINE += +define+DUALRATE_CLOCK -CFLAGS "-DDUALRATE"
+endif
+
+# VGC text-page read logger: `make VGCTXT=1` logs each VGC text-page-1 fetch
+# (V,H,H_CHAR,addr) for beam-race analysis (textfunk). Debug only; remove when
+# the beam-race work is done. NOTE: touch a source file to force a rebuild --
+# make tracks timestamps, not define changes.
+ifeq ($(VGCTXT),1)
+V_DEFINE += +define+DEBUG_VGC_TXT
+endif
+
+# FPGA-accurate SDRAM memory path: `make SDRAM=sim` replaces the instant-BRAM
+# fast RAM with the PRODUCTION sdram_burst + sdram_cache against the behavioral
+# chip model, glued exactly like Apple-IIgs.sv (accel_r mux, write back-pressure,
+# snoop, ch3, mem_stall->RDY), with clk_mem_ext driven at 8x by sim_main and a
+# golden-model coherency checker (prints SDRAMSIM_VIOLATION on stale reads).
+# ~6x slower; use for accelerator/memory-path debugging (doc/zipgs-14mhz-plan.md).
+# `make clean` first when switching -- make tracks timestamps, not defines.
+ifeq ($(SDRAM),sim)
+V_DEFINE += +define+SDRAM_SIM -CFLAGS "-DSDRAM_SIM"
+V_SRC_SDRAM = $(RTL)/sdram_burst.sv $(RTL)/sdram_cache.sv sdram_accel/sdram_sim_chip.sv sdram_tb/altddio_out.v
+else
+V_SRC_SDRAM =
+endif
+
+UNAME_S := $(shell uname -s)
+
+ifeq ($(UNAME_S), Darwin) #APPLE
+	ECHO_MESSAGE = "Mac OS X"
+	LIBS += -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo `sdl2-config --libs`
+	LIBS += -L/usr/local/lib -L/opt/local/lib
+
+	CXXFLAGS += `sdl2-config --cflags` -Iimgui
+	CXXFLAGS += `sdl2-config --cflags | sed 's|include/SDL2|include/|'`
+	CXXFLAGS += -I/usr/local/include -I/opt/local/include
+	CFLAGS = $(CXXFLAGS) -Iimgui
+endif
+
+ifeq ($(UNAME_S), Linux) #LINUX
+	ECHO_MESSAGE = "Linux"
+	LIBS += -lGL -ldl `sdl2-config --libs`
+
+	CXXFLAGS += `sdl2-config --cflags` -Iimgui
+	CXXFLAGS += $(CXX_DEFINE)
+	CFLAGS = $(CXXFLAGS)
+endif
+
+ifeq ($(findstring MINGW,$(UNAME_S)),MINGW)
+	ECHO_MESSAGE = "MinGW"
+	LIBS += -lgdi32 -lopengl32 -limm32 `pkg-config --static --libs sdl2`
+
+	CXXFLAGS += `pkg-config --cflags sdl2`
+	CFLAGS = $(CXXFLAGS)
+endif
+
+CC_OPT = -O2
+V_OPT = -O3 --x-assign fast --x-initial fast --noassert
+CXXFLAGS += $(CC_OPT) $(CXX_DEFINE)
+CFLAGS += $(CC_OPT) $(CC_DEFINE) -Iimgui
+LDFLAGS = $(LIBS)
+EXE = ./obj_dir/Vemu
+
+V_SRC = \
+	sim.v  \
+	$(RTL)/65C816/P65C816_pkg.sv \
+	$(RTL)/65C816/P65C816.sv \
+	$(RTL)/65C816/AddrGen.sv \
+	$(RTL)/65C816/BCDAdder.v \
+	$(RTL)/65C816/AddSubBCD.sv \
+	$(RTL)/65C816/ALU.sv \
+	$(RTL)/65C816/bit_adder.v \
+	$(RTL)/65C816/adder4.v \
+	$(RTL)/65C816/mcode.sv \
+	$(RTL)/clock_divider.v \
+	$(RTL)/rom.v \
+	$(RTL)/prtc.v \
+	$(RTL)/adb.v \
+	$(RTL)/../sys/iir_filter.v \
+	$(RTL)/sound.v \
+	$(RTL)/soundglu.v \
+	$(RTL)/syncram.v \
+	$(RTL)/es5503.v \
+	$(RTL)/paddle_timer.v \
+	$(RTL)/iwm_woz.v \
+	$(RTL)/iwm_flux.v \
+	$(RTL)/smartport_dev.v \
+	$(RTL)/flux_drive.v \
+	$(RTL)/bram.sv \
+	$(RTL)/woz_floppy_controller.sv \
+	$(RTL)/vgc.v \
+	$(RTL)/hdd.v \
+	$(RTL)/dpram.sv \
+	$(RTL)/video_timing.v \
+	$(RTL)/uart/rxuart.v \
+	$(RTL)/uart/txuart.v \
+	$(RTL)/scc8530.v \
+	$(RTL)/scc_iigs_wrapper.v \
+	$(RTL)/mmu.sv \
+	$(RTL)/zipgs_regs.sv \
+	$(RTL)/twgs_regs.sv \
+	$(RTL)/twgs_nvram.sv \
+	$(RTL)/twgs_rom.sv \
+	$(RTL)/twgs_card.sv \
+	$(RTL)/iigs.sv \
+	$(V_SRC_SDRAM)
+
+
+
+
+C_SRC = \
+	sim_main.cpp  \
+	sim/sim_bus.cpp sim/sim_blkdevice.cpp sim/sim_clock.cpp sim/sim_console.cpp sim/sim_video.cpp sim/sim_console.cpp sim/sim_input.cpp  sim/sim_audio.cpp sim/iigs_fmt.cpp \
+	sim/imgui/imgui_impl_sdl.cpp sim/imgui/imgui_impl_opengl2.cpp sim/imgui/imgui_draw.cpp sim/imgui/imgui_widgets.cpp sim/imgui/imgui_tables.cpp sim/imgui/imgui.cpp sim/imgui/ImGuiFileDialog.cpp sim/imgui/implot.cpp sim/imgui/implot_items.cpp
+
+VOUT = obj_dir/Vemu.cpp
+
+all: $(EXE)
+
+$(VOUT): $(V_SRC)  Makefile
+	$V -cc $(V_OPT) -LDFLAGS "$(LDFLAGS) " -exe  --Mdir ./obj_dir $(V_DEFINE) $(V_INC) $(TOP) -CFLAGS "$(CFLAGS)" $(V_SRC) $(C_SRC)
+	#$V -cc $(V_OPT) -LDFLAGS "$(LDFLAGS) " -exe --trace --Mdir ./obj_dir $(V_DEFINE) $(V_INC) $(TOP) -CFLAGS $(CFLAGS) $(V_SRC) $(C_SRC)
+
+$(EXE): $(VOUT) $(C_SRC)
+#	(cd obj_dir; make OPT="-fauto-inc-dec -fdce -fdefer-pop -fdse -ftree-ccp -ftree-ch -ftree-fre -ftree-dce -ftree-dse" -f Vemu.mk)
+	(cd obj_dir; make -f Vemu.mk OBJCACHE= OPT_FAST="-O2" OPT_SLOW="-O0" OPT_GLOBAL="-O2")
+
+fast:
+	(cd obj_dir; rm -f *.o ; make OPT="-fcompare-elim -fcprop-registers -fguess-branch-probability -fauto-inc-dec -fif-conversion2 -fif-conversion -fipa-pure-const -fdce -fipa-profile -fipa-reference -fmerge-constants -fsplit-wide-types -fdefer-pop -fdse -ftree-ccp -ftree-ch -ftree-fre -ftree-dce -ftree-dse -ftree-builtin-call-dce -ftree-copyrename -ftree-dominator-opts -ftree-forwprop -ftree-phiprop -ftree-sra -ftree-pta -ftree-ter -funit-at-a-time -ftree-bit-ccp -falign-functions  -falign-jumps -falign-loops  -falign-labels -fcaller-saves -fcrossjumping -fcse-follow-jumps -fcse-skip-blocks -fdelete-null-pointer-checks -fdevirtualize -fexpensive-optimizations -fgcse  -fgcse-lm -finline-small-functions -findirect-inlining -fipa-sra -foptimize-sibling-calls -fpartial-inlining -fpeephole2 -fregmove -freorder-blocks  -freorder-functions -frerun-cse-after-loop -fsched-interblock  -fsched-spec -fschedule-insns -fschedule-insns2 -fstrict-aliasing -fstrict-overflow -ftree-switch-conversion -ftree-pre -ftree-vrp" -f Vemu.mk)
+
+# Standalone MMU decode unit test: sweeps rtl/mmu.sv against the golden
+# C++ model in mmu_tb.cpp (see that file for what is covered).
+mmutest:
+	$V -cc --exe --top-module mmu --Mdir ./obj_dir_mmu -CFLAGS "-O2" ../rtl/mmu.sv mmu_tb.cpp -o Vmmu_tb
+	(cd obj_dir_mmu; make -f Vmmu.mk)
+	./obj_dir_mmu/Vmmu_tb
+
+clean:
+	rm -f obj_dir/*
+	rm -rf obj_dir_mmu
