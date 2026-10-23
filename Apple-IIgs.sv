@@ -306,6 +306,11 @@ assign status_mirror_view = {status[127:26], ~accel_twgs_snd, ~accel_twgs_gfx,
                              accel_cfg_speed, status[11:0]};
 reg  [127:0] status_mirror;
 reg          status_mirror_set;
+// Main first asserts status[0] before loading CFG and holds it through the
+// configured ROM transfers. Until that host-reset lifecycle starts, do not
+// preload hps_io with a snapshot of the FPGA power-up default status.
+// Keep this latch across guest resets; FPGA configuration initializes it.
+reg          mirror_host_reset_seen = 1'b0;
 reg  [7:0]   mirror_hold;   // post-reset grace window (see below)
 reg  [11:0]  mirror_last;   // {snd,gfx,irq,ctr,cps,pdl,spkr,card(2),speed(3)}
 wire [11:0]  mirror_now = {~accel_twgs_snd, ~accel_twgs_gfx,
@@ -316,8 +321,9 @@ wire [11:0]  mirror_osd = {status[25], status[24],
                            status[23], status[20], status[19], status[18],
                            status[17], status[16:15], status[14:12]};
 always @(posedge clk_sys) begin
+	if (status[0]) mirror_host_reset_seen <= 1'b1;
 	status_mirror_set <= 1'b0;
-	if (reset) begin
+	if (reset || !mirror_host_reset_seen) begin
 		mirror_hold <= 8'd255;
 		mirror_last <= mirror_osd;   // adopt the OSD state at reset: no push
 	end else if (mirror_hold != 8'd0) begin
