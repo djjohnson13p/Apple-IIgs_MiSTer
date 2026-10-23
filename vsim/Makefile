@@ -147,6 +147,7 @@ V_SRC = \
 	$(RTL)/twgs_nvram.sv \
 	$(RTL)/twgs_rom.sv \
 	$(RTL)/twgs_card.sv \
+	$(RTL)/twgs_cda_boot_hook.sv \
 	$(RTL)/iigs.sv \
 	$(V_SRC_SDRAM)
 

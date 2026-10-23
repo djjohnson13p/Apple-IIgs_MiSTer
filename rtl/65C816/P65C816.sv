@@ -42,7 +42,11 @@ module P65C816
    output logic  VDA/*verilator public_flat*/,
    output logic  MLB/*verilator public_flat*/,
    output logic  VPB/*verilator public_flat*/,
-   output logic  I_FLAG  // P[2] (interrupt disable) — accelerator IRQ-delay tap
+   output logic  I_FLAG, // P[2] (interrupt disable) — accelerator IRQ-delay tap
+   // Passive accelerator observations. Neither output changes CPU state.
+   output [15:0] X_OUT,
+   output        NATIVE_FETCH_ACCEPTED,
+   output        TOOLBOX_FETCH_ACCEPTED
    );
 
   logic [15:0]   A/*verilator public_flat*/;
@@ -139,6 +143,11 @@ module P65C816
   logic          JSR_FOUND;
 
   assign EN = RDY_IN & CE & (~WAIExec) & (~STPExec);
+  assign X_OUT = X;
+  assign NATIVE_FETCH_ACCEPTED = RST_N && EN && !EF && STATE == 4'd0 &&
+                                 !GotInterrupt && NextIR == D_IN && WE &&
+                                 VPA && VDA && VPB;
+  assign TOOLBOX_FETCH_ACCEPTED = NATIVE_FETCH_ACCEPTED && !MF && !XF;
 
   assign IsBranchCycle1 = (IR[4:0] == 5'b10000 & STATE == 4'b0001) ? 1'b1 :
                           1'b0;
