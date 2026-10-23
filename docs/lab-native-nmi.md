@@ -9,6 +9,11 @@ The production CPU passes all 16 synthetic diagnostic cases below. No RTL
 behavior was changed, `TWGS_CDA_INSTALL` remains disabled, and this is not a
 working-CDA or hardware-compatibility claim.
 
+A later full-system investigation found a separate phase-dependent NMI edge
+delivery defect, reproduced without system ROMs. Its isolated fix and evidence
+are in [lab-nmi-delivery.md](lab-nmi-delivery.md). The 16 frame tests below also
+pass with that fix; the conclusion about the proposed frame/RTI defect remains.
+
 ## Candidate and evidence
 
 [Upstream issue 1](https://github.com/MiSTer-devel/Apple-IIgs_MiSTer/issues/1)

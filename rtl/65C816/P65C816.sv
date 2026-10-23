@@ -739,7 +739,11 @@ module P65C816
             OLD_NMI_N <= NMI_N;
             if (NMI_N == 1'b0 & OLD_NMI_N == 1'b1 & NMI_SYNC == 1'b0)
                NMI_SYNC <= 1'b1;
-            else if (LAST_CYCLE == 1'b1 && NMI_SYNC == 1'b1 && EN == 1'b1)
+            // Keep the edge pending until the interrupt decision consumes it.
+            // NMI_ACTIVE trails NMI_SYNC by one enabled cycle; clearing on an
+            // earlier LAST_CYCLE can otherwise discard the only falling edge.
+            else if (LAST_CYCLE == 1'b1 && NMI_ACTIVE == 1'b1 &&
+                     EN == 1'b1 && GotInterrupt == 1'b0)
                NMI_SYNC <= 1'b0;
          end
       end
