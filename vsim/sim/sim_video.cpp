@@ -29,7 +29,7 @@ bool output_usevsync = 1;
 
 uint32_t* output_ptr = NULL;
 unsigned int output_size;
-#ifdef WIN32
+#if defined(_MSC_VER)
 HWND hwnd;
 WNDCLASSEX wc;
 #else
@@ -53,7 +53,7 @@ bool last_vsync;
 bool frame_ready = 1;
 
 // Statistics
-#ifdef WIN32
+#if defined(_MSC_VER)
 SYSTEMTIME actualtime;
 LONG time_ms;
 LONG old_time;
@@ -70,7 +70,7 @@ int stats_xMin;
 int stats_yMin;
 
 
-#ifndef WIN32
+#if !defined(_MSC_VER)
 SDL_Renderer* renderer = NULL;
 SDL_Texture* texture = NULL;
 #else
@@ -95,7 +95,7 @@ static int                      g_VertexBufferSize = 5000, g_IndexBufferSize = 1
 static ID3D11Texture2D* texture = NULL;
 #endif
 
-#ifdef WIN32
+#if defined(_MSC_VER)
 // Data
 static IDXGISwapChain* g_pSwapChain = NULL;
 static ID3D11RenderTargetView* g_mainRenderTargetView = NULL;
@@ -211,7 +211,7 @@ int SimVideo::Initialise(const char* windowTitle) {
 	// Setup pointers for video texture
 	output_ptr = (uint32_t*)malloc(output_size);
 
-#ifdef WIN32
+#if defined(_MSC_VER)
 	// Create application window
 	wc = { sizeof(WNDCLASSEX), CS_CLASSDC, WndProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, _T(windowTitle), NULL };
 	RegisterClassEx(&wc);
@@ -261,7 +261,7 @@ int SimVideo::Initialise(const char* windowTitle) {
 		ImGui::StyleColorsDark();
 	}
 
-#ifdef WIN32
+#if defined(_MSC_VER)
 	// Setup Platform/Renderer bindings
 	if (!headless) {
 		ImGui_ImplWin32_Init(hwnd);
@@ -279,7 +279,7 @@ int SimVideo::Initialise(const char* windowTitle) {
 	memset(output_ptr, 0xAA, output_size);
 
 
-#ifdef WIN32
+#if defined(_MSC_VER)
 	// Upload texture to graphics system
 	D3D11_TEXTURE2D_DESC desc;
 	ZeroMemory(&desc, sizeof(desc));
@@ -344,7 +344,7 @@ int SimVideo::Initialise(const char* windowTitle) {
 
 void SimVideo::UpdateTexture() {
 
-#ifdef WIN32
+#if defined(_MSC_VER)
 	// Update the texture!
 	// D3D11_USAGE_DEFAULT MUST be set in the texture description (somewhere above) for this to work.
 	// (D3D11_USAGE_DYNAMIC is for use with map / unmap.) ElectronAsh.
@@ -377,7 +377,7 @@ void SimVideo::UpdateTexture() {
 }
 
 void SimVideo::CleanUp() {
-#ifdef WIN32
+#if defined(_MSC_VER)
 	// Close imgui stuff properly...
 	if (!headless) {
 		ImGui_ImplDX11_Shutdown();
@@ -403,7 +403,7 @@ void SimVideo::CleanUp() {
 
 
 void SimVideo::StartFrame() {
-#ifdef WIN32
+#if defined(_MSC_VER)
 	ImGui_ImplDX11_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 #else
@@ -445,7 +445,7 @@ void SimVideo::Clock(bool hblank, bool vblank, bool hsync, bool vsync, uint32_t 
 		count_frame++;
 		count_line = 0;
 		frame_ready = 1;
-#ifdef WIN32
+#if defined(_MSC_VER)
 		GetSystemTime(&actualtime);
 		time_ms = (actualtime.wSecond * 1000) + actualtime.wMilliseconds;
 #else

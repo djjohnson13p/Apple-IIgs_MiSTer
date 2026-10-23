@@ -3026,4 +3026,288 @@ wire clk_7M_en;
 assign clk_7M = clk_7M_en;
 wire q3_en;
 
+`ifdef TWGS_LAB_TRACE
+`ifndef SYNTHESIS
+// Additional control observer: visible with CDA delivery disabled, so native
+// entry and Tool Locator activity need not be consequences of a preceding NMI.
+reg lab_control_ef = 1'b1;
+integer lab_control_native_fetches = 0;
+integer lab_control_tools = 0;
+integer lab_control_returns = 0;
+reg lab_control_boot_trace = 1'b0;
+integer lab_control_boot_bus = 0;
+wire lab_boot_return_fetch = phi2 && cpu.EN && cpu_vpa && cpu_vda && !we &&
+                             !cpu.EF && cpu.STATE == 4'd0 && !cpu.GotInterrupt &&
+                             cpu.NextIR == cpu_din;
+wire lab_boot_return_entry = lab_boot_return_fetch && cpu.X == 16'h0105 &&
+                             (cpu_addr == 24'hE10000 || cpu_addr == 24'hE10004);
+always @(posedge CLK_14M) begin
+  if (reset) begin
+    lab_control_ef <= 1'b1;
+    lab_control_native_fetches <= 0;
+    lab_control_tools <= 0;
+    lab_control_returns <= 0;
+    lab_control_boot_trace <= 1'b0;
+    lab_control_boot_bus <= 0;
+  end else if (phi2 && cpu.EN) begin
+    lab_control_ef <= cpu.EF;
+    if (cpu.EF != lab_control_ef)
+      $display("LAB-CONTROL MODE e=%b a=%06x pc=%02x:%04x sp=%04x p=%03x t=%0t",
+               cpu.EF, cpu_addr, cpu.PBR, cpu.PC, cpu.SP, cpu.P, $time);
+    if (lab_control_boot_trace && lab_control_boot_bus < 65536) begin
+      lab_control_boot_bus <= lab_control_boot_bus + 1;
+      $display("LAB-CONTROL BOOTBUS n=%0d a=%06x wr=%b in=%02x out=%02x vpa=%b vda=%b vpb=%b pc=%02x:%04x sp=%04x p=%03x ir=%02x state=%x got=%b nextir=%02x",
+               lab_control_boot_bus, cpu_addr, we, cpu_din, cpu_dout,
+               cpu_vpa, cpu_vda, cpu_vpb, cpu.PBR, cpu.PC, cpu.SP, cpu.P, cpu.IR, cpu.STATE, cpu.GotInterrupt, cpu.NextIR);
+      if (lab_control_boot_bus == 65535) begin
+        $display("LAB-BOOTRETURN CAP kind=BOOTBUS count=65536 outcome=unproved t=%0t", $time);
+      end
+    end
+    // Independent of the capped TOOL inventory: a later accepted call can arm
+    // this window even when earlier physical tool fetches filled that inventory.
+    if (lab_boot_return_entry) lab_control_boot_trace <= 1'b1;
+    if (cpu_vpa && cpu_vda && !we && !cpu.EF) begin
+      if (cpu_addr[23:16] != 8'hBC && lab_control_native_fetches < 512) begin
+        lab_control_native_fetches <= lab_control_native_fetches + 1;
+        $display("LAB-CONTROL FETCH n=%0d a=%06x in=%02x sp=%04x p=%03x a_reg=%04x x_reg=%04x y_reg=%04x state=%x got=%b nextir=%02x t=%0t",
+                 lab_control_native_fetches, cpu_addr, cpu_din, cpu.SP, cpu.P, cpu.A, cpu.X, cpu.Y, cpu.STATE, cpu.GotInterrupt, cpu.NextIR, $time);
+      end
+      if ((cpu_addr == 24'hE10000 || cpu_addr == 24'hE10004) && lab_control_tools < 128) begin
+        lab_control_tools <= lab_control_tools + 1;
+        $display("LAB-CONTROL TOOL n=%0d a=%06x sp=%04x p=%03x a_reg=%04x x_reg=%04x y_reg=%04x state=%x got=%b nextir=%02x t=%0t",
+                 lab_control_tools, cpu_addr, cpu.SP, cpu.P, cpu.A, cpu.X, cpu.Y, cpu.STATE, cpu.GotInterrupt, cpu.NextIR, $time);
+      end
+      if (lab_control_boot_trace && (cpu_din == 8'h6B || cpu_din == 8'h60) && lab_control_returns < 128) begin
+        lab_control_returns <= lab_control_returns + 1;
+        $display("LAB-CONTROL RETURN n=%0d a=%06x in=%02x sp=%04x p=%03x state=%x got=%b nextir=%02x t=%0t",
+                 lab_control_returns, cpu_addr, cpu_din, cpu.SP, cpu.P, cpu.STATE, cpu.GotInterrupt, cpu.NextIR, $time);
+      end
+    end
+  end
+end
+// Bounded evidence for the ORIGINAL caller frame, not a readiness detector.
+// The ring is read before this cycle's nonblocking insertion. ENTRY is therefore
+// preceded by up to 32 accepted CPU bus cycles, including an ordinary JSL's
+// opcode/operands and three frame writes. No RAM/ROM is inspected out of band.
+typedef struct packed {
+  logic [63:0] cycle_no, stamp;
+  logic [23:0] addr, pc;
+  logic [15:0] sp, a_reg, x_reg, y_reg;
+  logic [8:0] p;
+  logic [7:0] din, dout, ir, nextir;
+  logic [3:0] state;
+  logic wr, vpa, vda, vpb, got, last_cycle, e, m, x;
+} lab_boot_return_bus_t;
+lab_boot_return_bus_t lab_boot_return_ring [0:31];
+lab_boot_return_bus_t lab_boot_return_now;
+integer lab_boot_return_head = 0;
+integer lab_boot_return_fill = 0;
+integer lab_boot_return_i;
+integer lab_boot_return_slot;
+reg [63:0] lab_boot_return_cycle = 0;
+integer lab_boot_return_call = 0;
+reg lab_boot_return_active = 1'b0;
+reg [15:0] lab_boot_return_original_s = 0;
+wire [15:0] lab_boot_return_frame_lo = lab_boot_return_original_s + 16'd1;
+wire [15:0] lab_boot_return_frame_hi = lab_boot_return_original_s + 16'd2;
+wire [15:0] lab_boot_return_frame_bank = lab_boot_return_original_s + 16'd3;
+integer lab_boot_return_master_cycles = 0;
+localparam integer LAB_BOOT_RETURN_TIMEOUT = 28636360; // two seconds at CLK_14M
+integer lab_boot_return_frame_events = 0;
+integer lab_boot_return_candidates = 0;
+integer lab_boot_return_window_left = 0;
+integer lab_boot_return_window_index = 0;
+
+task automatic lab_boot_return_emit(input string kind, input integer call_id,
+                                  input integer candidate_id, input integer n,
+                                  input lab_boot_return_bus_t sample);
+  $display("LAB-BOOTRETURN BUS kind=%s call=%0d candidate=%0d n=%0d cyc=%0d t=%0t a=%06x wr=%b in=%02x out=%02x vpa=%b vda=%b vpb=%b pc=%06x sp=%04x p=%03x a_reg=%04x x_reg=%04x y_reg=%04x ir=%02x state=%x got=%b nextir=%02x last=%b e=%b m=%b x=%b",
+           kind, call_id, candidate_id, n, sample.cycle_no, sample.stamp,
+           sample.addr, sample.wr, sample.din, sample.dout, sample.vpa,
+           sample.vda, sample.vpb, sample.pc, sample.sp, sample.p,
+           sample.a_reg, sample.x_reg, sample.y_reg, sample.ir, sample.state,
+           sample.got, sample.nextir, sample.last_cycle, sample.e, sample.m, sample.x);
+endtask
+
+always @(posedge CLK_14M) begin
+  if (reset) begin
+    if (lab_boot_return_active)
+      $display("LAB-BOOTRETURN TRACK_END call=%0d reason=reset outcome=unproved t=%0t", lab_boot_return_call, $time);
+    lab_boot_return_head <= 0;
+    lab_boot_return_fill <= 0;
+    lab_boot_return_cycle <= 0;
+    lab_boot_return_call <= 0;
+    lab_boot_return_active <= 1'b0;
+    lab_boot_return_original_s <= 0;
+    lab_boot_return_master_cycles <= 0;
+    lab_boot_return_frame_events <= 0;
+    lab_boot_return_candidates <= 0;
+    lab_boot_return_window_left <= 0;
+    lab_boot_return_window_index <= 0;
+  end else begin
+    // This deadline advances even when CPU.EN is stalled or the CPU waits.
+    if (lab_boot_return_active) begin
+      lab_boot_return_master_cycles <= lab_boot_return_master_cycles + 1;
+      if (lab_boot_return_master_cycles == LAB_BOOT_RETURN_TIMEOUT - 1) begin
+        $display("LAB-BOOTRETURN TRACK_END call=%0d reason=master_clock_timeout master_cycles=%0d frame_events=%0d candidates=%0d window_remaining=%0d outcome=unproved t=%0t",
+                 lab_boot_return_call, LAB_BOOT_RETURN_TIMEOUT,
+                 lab_boot_return_frame_events, lab_boot_return_candidates,
+                 lab_boot_return_window_left, $time);
+        lab_boot_return_active <= 1'b0;
+        lab_boot_return_window_left <= 0;
+      end
+    end
+    if (phi2 && cpu.EN) begin
+      lab_boot_return_now.cycle_no = lab_boot_return_cycle;
+      lab_boot_return_now.stamp = $time;
+      lab_boot_return_now.addr = cpu_addr;
+      lab_boot_return_now.pc = {cpu.PBR, cpu.PC};
+      lab_boot_return_now.sp = cpu.SP;
+      lab_boot_return_now.a_reg = cpu.A;
+      lab_boot_return_now.x_reg = cpu.X;
+      lab_boot_return_now.y_reg = cpu.Y;
+      lab_boot_return_now.p = cpu.P;
+      lab_boot_return_now.din = cpu_din;
+      lab_boot_return_now.dout = cpu_dout;
+      lab_boot_return_now.ir = cpu.IR;
+      lab_boot_return_now.nextir = cpu.NextIR;
+      lab_boot_return_now.state = cpu.STATE;
+      lab_boot_return_now.wr = we;
+      lab_boot_return_now.vpa = cpu_vpa;
+      lab_boot_return_now.vda = cpu_vda;
+      lab_boot_return_now.vpb = cpu_vpb;
+      lab_boot_return_now.got = cpu.GotInterrupt;
+      lab_boot_return_now.last_cycle = cpu.LAST_CYCLE;
+      lab_boot_return_now.e = cpu.EF;
+      lab_boot_return_now.m = cpu.MF;
+      lab_boot_return_now.x = cpu.XF;
+      lab_boot_return_ring[lab_boot_return_head] <= lab_boot_return_now;
+      lab_boot_return_head <= (lab_boot_return_head + 1) & 31;
+      if (lab_boot_return_fill < 32) lab_boot_return_fill <= lab_boot_return_fill + 1;
+      lab_boot_return_cycle <= lab_boot_return_cycle + 1;
+
+      // New ENTRY wins deterministically if the prior track times out on this
+      // edge. A nested/repeated call never silently reuses the prior call-id.
+      if (lab_boot_return_entry) begin
+        if (lab_boot_return_active && lab_boot_return_master_cycles != LAB_BOOT_RETURN_TIMEOUT - 1)
+          $display("LAB-BOOTRETURN TRACK_END call=%0d reason=new_entry window_remaining=%0d outcome=unproved t=%0t",
+                   lab_boot_return_call, lab_boot_return_window_left, $time);
+        lab_boot_return_call <= lab_boot_return_call + 1;
+        lab_boot_return_active <= 1'b1;
+        lab_boot_return_original_s <= cpu.SP;
+        lab_boot_return_master_cycles <= 0;
+        lab_boot_return_frame_events <= 0;
+        lab_boot_return_candidates <= 0;
+        lab_boot_return_window_left <= 0;
+        lab_boot_return_window_index <= 0;
+        $display("LAB-BOOTRETURN ENTRY call=%0d original_s=%04x ring_count=%0d timeout_master_cycles=%0d frame_cap=4096 candidate_cap=64 window_cycles=16 outcome=unproved t=%0t",
+                 lab_boot_return_call + 1, cpu.SP, lab_boot_return_fill,
+                 LAB_BOOT_RETURN_TIMEOUT, $time);
+        for (lab_boot_return_i = 0; lab_boot_return_i < lab_boot_return_fill; lab_boot_return_i = lab_boot_return_i + 1) begin
+          lab_boot_return_slot = (lab_boot_return_head - lab_boot_return_fill + lab_boot_return_i + 32) & 31;
+          lab_boot_return_emit("PRE", lab_boot_return_call + 1, 0,
+                               lab_boot_return_i, lab_boot_return_ring[lab_boot_return_slot]);
+        end
+        lab_boot_return_emit("ENTRY", lab_boot_return_call + 1, 0, 0, lab_boot_return_now);
+      end else if (lab_boot_return_active && lab_boot_return_master_cycles != LAB_BOOT_RETURN_TIMEOUT - 1) begin
+        // Only valid bank-00 DATA accesses match the original native JSL frame;
+        // dummy address presentations are not reported as frame reads/writes.
+        if (cpu_addr[23:16] == 8'h00 && cpu_vda && !cpu_vpa &&
+            (cpu_addr[15:0] == lab_boot_return_frame_lo ||
+             cpu_addr[15:0] == lab_boot_return_frame_hi ||
+             cpu_addr[15:0] == lab_boot_return_frame_bank)) begin
+          if (lab_boot_return_frame_events < 4096) begin
+            if (we)
+              lab_boot_return_emit("FRAME_WRITE", lab_boot_return_call,
+                                   0, lab_boot_return_frame_events, lab_boot_return_now);
+            else
+              lab_boot_return_emit("FRAME_READ", lab_boot_return_call,
+                                   0, lab_boot_return_frame_events, lab_boot_return_now);
+            lab_boot_return_frame_events <= lab_boot_return_frame_events + 1;
+            if (lab_boot_return_frame_events == 4095) begin
+              $display("LAB-BOOTRETURN CAP kind=FRAME call=%0d count=4096 outcome=unproved t=%0t", lab_boot_return_call, $time);
+            end
+          end
+        end
+        if (lab_boot_return_window_left > 0) begin
+          lab_boot_return_emit("RETURN_WINDOW", lab_boot_return_call,
+                               lab_boot_return_candidates, lab_boot_return_window_index, lab_boot_return_now);
+          lab_boot_return_window_left <= lab_boot_return_window_left - 1;
+          lab_boot_return_window_index <= lab_boot_return_window_index + 1;
+          if (lab_boot_return_window_left == 1)
+            $display("LAB-BOOTRETURN WINDOW_END call=%0d candidate=%0d count=16 outcome=unproved t=%0t",
+                     lab_boot_return_call, lab_boot_return_candidates, $time);
+        end
+        if (lab_boot_return_fetch && cpu.SP == lab_boot_return_original_s &&
+            (cpu_din == 8'h6B || cpu_din == 8'h60)) begin
+          if (lab_boot_return_candidates < 64) begin
+            if (lab_boot_return_window_left > 1)
+              $display("LAB-BOOTRETURN WINDOW_END call=%0d candidate=%0d reason=overlap remaining=%0d outcome=unproved t=%0t",
+                       lab_boot_return_call, lab_boot_return_candidates, lab_boot_return_window_left - 1, $time);
+            lab_boot_return_candidates <= lab_boot_return_candidates + 1;
+            lab_boot_return_window_left <= 15;
+            lab_boot_return_window_index <= 1;
+            $display("LAB-BOOTRETURN RETURN_CANDIDATE call=%0d candidate=%0d opcode=%02x original_s=%04x count=16 includes_fetch=1 outcome=unproved t=%0t",
+                     lab_boot_return_call, lab_boot_return_candidates + 1, cpu_din, lab_boot_return_original_s, $time);
+            lab_boot_return_emit("RETURN_WINDOW", lab_boot_return_call,
+                                 lab_boot_return_candidates + 1, 0, lab_boot_return_now);
+            if (lab_boot_return_candidates == 63) begin
+              $display("LAB-BOOTRETURN CAP kind=RETURN_CANDIDATE call=%0d count=64 outcome=unproved t=%0t", lab_boot_return_call, $time);
+            end
+          end
+        end
+      end
+    end
+  end
+end
+// Simulation observer only: retain the actual interrupt context and bus cycles.
+// This deliberately makes no change to NMI delivery, CPU, mapping, or firmware.
+reg lab_twgs_active = 1'b0;
+reg lab_twgs_nmi_low = 1'b0;
+integer lab_twgs_bus_count = 0;
+integer lab_twgs_rtl_count = 0;
+integer lab_twgs_brk_count = 0;
+always @(posedge CLK_14M) begin
+  if (reset) begin
+    lab_twgs_active <= 1'b0;
+    lab_twgs_nmi_low <= 1'b0;
+    lab_twgs_bus_count <= 0;
+    lab_twgs_rtl_count <= 0;
+    lab_twgs_brk_count <= 0;
+  end else begin
+    lab_twgs_nmi_low <= !twgs_nmi_n;
+    if (!twgs_nmi_n && !lab_twgs_nmi_low) begin
+      lab_twgs_active <= 1'b1;
+      lab_twgs_bus_count <= 0;
+      $display("LAB-TWGS NMI pc=%02x:%04x sp=%04x p=%03x e=%b m=%b x=%b state=%x t=%0t",
+               cpu.PBR, cpu.PC, cpu.SP, cpu.P, cpu.EF, cpu.MF, cpu.XF, cpu.STATE, $time);
+    end
+    if (lab_twgs_active && phi2 && cpu.EN) begin
+      if (lab_twgs_bus_count < 512) begin
+        lab_twgs_bus_count <= lab_twgs_bus_count + 1;
+        $display("LAB-TWGS BUS n=%0d a=%06x wr=%b in=%02x out=%02x vpa=%b vda=%b vpb=%b pc=%02x:%04x sp=%04x p=%03x ir=%02x state=%x",
+                 lab_twgs_bus_count, cpu_addr, we, cpu_din, cpu_dout,
+                 cpu_vpa, cpu_vda, cpu_vpb, cpu.PBR, cpu.PC, cpu.SP, cpu.P, cpu.IR, cpu.STATE);
+      end
+      if (cpu_vpa && cpu_vda && !we) begin
+        if (cpu_addr == 24'hBCFA2F || cpu_addr == 24'hBCFA5D || cpu_addr == 24'hBCFA88)
+          $display("LAB-TWGS LAND a=%06x sp=%04x p=%03x a_reg=%04x x_reg=%04x y_reg=%04x t=%0t",
+                   cpu_addr, cpu.SP, cpu.P, cpu.A, cpu.X, cpu.Y, $time);
+        if (cpu_din == 8'h6B && lab_twgs_rtl_count < 64) begin
+          lab_twgs_rtl_count <= lab_twgs_rtl_count + 1;
+          $display("LAB-TWGS RTL n=%0d a=%06x sp=%04x p=%03x t=%0t",
+                   lab_twgs_rtl_count, cpu_addr, cpu.SP, cpu.P, $time);
+        end
+        if (cpu_din == 8'h00 && lab_twgs_brk_count < 16) begin
+          lab_twgs_brk_count <= lab_twgs_brk_count + 1;
+          $display("LAB-TWGS BRK n=%0d a=%06x sp=%04x p=%03x t=%0t",
+                   lab_twgs_brk_count, cpu_addr, cpu.SP, cpu.P, $time);
+        end
+      end
+    end
+  end
+end
+`endif
+`endif
+
 endmodule
