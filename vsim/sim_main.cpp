@@ -43,6 +43,7 @@
 #include "sim_clock.h"
 #include "iigs_fmt.h"      // shared Apple IIgs disk-format codec
 #include <unistd.h>
+#include "sim/lab_native_compat.h"
 #include <vector>
 // parallel_clemens.h removed
 
@@ -72,7 +73,7 @@
 // 0=inactive, 1=active (tracing), 2=armed (waiting for driver return to activate)
 static int g_ktrace_active = 0;
 
-#ifndef WIN32
+#if !defined(_MSC_VER)
 #include <SDL_opengl.h>
 #endif
 
@@ -246,6 +247,9 @@ SimVideo video(VGA_WIDTH, VGA_HEIGHT, VGA_ROTATE);
 float vga_scale = 1.0;
 // Headless mode flag (no SDL/ImGui rendering)
 bool headless = false;
+// Host-only forensic RAM scan. Opt in to preserve the original diagnostic.
+bool bank17_forensics = false;
+bool dib_forensics = false;
 
 // Verilog module
 // --------------
@@ -1081,11 +1085,11 @@ void send_clock() {
 	struct tm tm;
 	if (fixed_time) {
 		t = fixed_time;
-		gmtime_r(&t, &tm);
+		lab_gmtime_r(&t, &tm);
 	} else {
 		tzset();
 		time(&t);
-		localtime_r(&t, &tm);
+		lab_localtime_r(&t, &tm);
 	}
 
 	
@@ -3477,7 +3481,7 @@ int verilate() {
                         }
 
                         // Monitor E1:D540-D5E0 range for ANY byte changes (catch dib_last_sts writes)
-                        {
+                        if (dib_forensics) {
                             static uint8_t prev_dib_area[0xA0];
                             static bool dib_area_init = false;
                             static int dib_area_change_count = 0;
@@ -3970,7 +3974,7 @@ int verilate() {
                             // Bank-17 first-write tracer: snapshot the whole bank and log
                             // every time a byte in bank 17 transitions from 00 to nonzero
                             // (or from nonzero to a different nonzero). Keep a short log.
-                            {
+                            if (bank17_forensics) {
                                 static uint8_t bank17_shadow[0x10000];
                                 static bool bank17_init = false;
                                 static int bank17_writes_logged = 0;
@@ -4216,8 +4220,8 @@ static std::string prepareFloppyImage(const std::string& path) {
     }
     if (!wn) return path;
 
-    char tmpl[] = "/tmp/sim_floppy_XXXXXX.woz";
-    int fd = mkstemps(tmpl, 4);
+    char tmpl[] = "sim_floppy_XXXXXX.woz";
+    int fd = lab_mkstemps(tmpl, 4);
     if (fd < 0) return path;
     ssize_t wrote = write(fd, woz.data(), wn);
     close(fd);
@@ -4844,6 +4848,10 @@ int main(int argc, char** argv, char** env) {
     // Detect headless from env
     const char* env_headless = getenv("HEADLESS");
     if (env_headless && env_headless[0] && env_headless[0] != '0') headless = true;
+    const char* env_bank17_scan = getenv("APPLE_IIGS_BANK17_SCAN");
+    bank17_forensics = env_bank17_scan && env_bank17_scan[0] && env_bank17_scan[0] != '0';
+    const char* env_dib_scan = getenv("APPLE_IIGS_DIB_SCAN");
+    dib_forensics = env_dib_scan && env_dib_scan[0] && env_dib_scan[0] != '0';
 
 	// Parse command line arguments
 	for (int i = 1; i < argc; i++) {
@@ -5148,7 +5156,7 @@ int main(int argc, char** argv, char** env) {
 
 	// parallel_clemens removed
 
-#ifdef WIN32
+#if defined(_MSC_VER)
 	// Attach debug console to the verilated code
 	Verilated::setDebug(console);
 #endif
@@ -5219,7 +5227,7 @@ int main(int argc, char** argv, char** env) {
     if (!headless) {
         input.Initialise();
     }
-#ifdef WIN32
+#if defined(_MSC_VER)
 	input.SetMapping(input_up, DIK_UP);
 	input.SetMapping(input_right, DIK_RIGHT);
 	input.SetMapping(input_down, DIK_DOWN);
@@ -5385,7 +5393,7 @@ int main(int argc, char** argv, char** env) {
        // iwm_init();
        // iwm_reset();
 
-#ifdef WIN32
+#if defined(_MSC_VER)
 	MSG msg;
 	ZeroMemory(&msg, sizeof(msg));
 	while (msg.message != WM_QUIT)

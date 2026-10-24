@@ -3026,4 +3026,56 @@ wire clk_7M_en;
 assign clk_7M = clk_7M_en;
 wire q3_en;
 
+`ifdef TWGS_LAB_TRACE
+`ifndef SYNTHESIS
+// Simulation observer only: retain the actual interrupt context and bus cycles.
+// This deliberately makes no change to NMI delivery, CPU, mapping, or firmware.
+reg lab_twgs_active = 1'b0;
+reg lab_twgs_nmi_low = 1'b0;
+integer lab_twgs_bus_count = 0;
+integer lab_twgs_rtl_count = 0;
+integer lab_twgs_brk_count = 0;
+always @(posedge CLK_14M) begin
+  if (reset) begin
+    lab_twgs_active <= 1'b0;
+    lab_twgs_nmi_low <= 1'b0;
+    lab_twgs_bus_count <= 0;
+    lab_twgs_rtl_count <= 0;
+    lab_twgs_brk_count <= 0;
+  end else begin
+    lab_twgs_nmi_low <= !twgs_nmi_n;
+    if (!twgs_nmi_n && !lab_twgs_nmi_low) begin
+      lab_twgs_active <= 1'b1;
+      lab_twgs_bus_count <= 0;
+      $display("LAB-TWGS NMI pc=%02x:%04x sp=%04x p=%03x e=%b m=%b x=%b state=%x t=%0t",
+               cpu.PBR, cpu.PC, cpu.SP, cpu.P, cpu.EF, cpu.MF, cpu.XF, cpu.STATE, $time);
+    end
+    if (lab_twgs_active && phi2 && cpu.EN) begin
+      if (lab_twgs_bus_count < 512) begin
+        lab_twgs_bus_count <= lab_twgs_bus_count + 1;
+        $display("LAB-TWGS BUS n=%0d a=%06x wr=%b in=%02x out=%02x vpa=%b vda=%b vpb=%b pc=%02x:%04x sp=%04x p=%03x ir=%02x state=%x",
+                 lab_twgs_bus_count, cpu_addr, we, cpu_din, cpu_dout,
+                 cpu_vpa, cpu_vda, cpu_vpb, cpu.PBR, cpu.PC, cpu.SP, cpu.P, cpu.IR, cpu.STATE);
+      end
+      if (cpu_vpa && cpu_vda && !we) begin
+        if (cpu_addr == 24'hBCFA2F || cpu_addr == 24'hBCFA5D || cpu_addr == 24'hBCFA88)
+          $display("LAB-TWGS LAND a=%06x sp=%04x p=%03x a_reg=%04x x_reg=%04x y_reg=%04x t=%0t",
+                   cpu_addr, cpu.SP, cpu.P, cpu.A, cpu.X, cpu.Y, $time);
+        if (cpu_din == 8'h6B && lab_twgs_rtl_count < 64) begin
+          lab_twgs_rtl_count <= lab_twgs_rtl_count + 1;
+          $display("LAB-TWGS RTL n=%0d a=%06x sp=%04x p=%03x t=%0t",
+                   lab_twgs_rtl_count, cpu_addr, cpu.SP, cpu.P, $time);
+        end
+        if (cpu_din == 8'h00 && lab_twgs_brk_count < 16) begin
+          lab_twgs_brk_count <= lab_twgs_brk_count + 1;
+          $display("LAB-TWGS BRK n=%0d a=%06x sp=%04x p=%03x t=%0t",
+                   lab_twgs_brk_count, cpu_addr, cpu.SP, cpu.P, $time);
+        end
+      end
+    end
+  end
+end
+`endif
+`endif
+
 endmodule
