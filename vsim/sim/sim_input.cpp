@@ -24,7 +24,7 @@ unsigned char m_keyboardState_last[256];
 
 static DebugConsole console;
 
-#ifdef WIN32
+#if defined(_MSC_VER)
 static const unsigned int ev2ps2[] =
 {
 	NONE, //0   KEY_RESERVED
@@ -525,7 +525,7 @@ static const int ev2ps2[] =
 #endif
 bool ReadKeyboard()
 {
-#ifdef WIN32
+#if defined(_MSC_VER)
 	HRESULT result;
 
 	// Read the keyboard device.
@@ -552,7 +552,7 @@ bool ReadKeyboard()
 
 int SimInput::Initialise() {
 
-#ifdef WIN32
+#if defined(_MSC_VER)
 	m_directInput = 0;
 	m_keyboard = 0;
 	HRESULT result;
@@ -578,14 +578,14 @@ void SimInput::Read() {
 
 	// Collect inputs
 	for (int i = 0; i < inputCount; i++) {
-#ifdef WIN32
+#if defined(_MSC_VER)
 		inputs[i] = m_keyboardState[mappings[i]] & 0x80;
 #else
 		inputs[i] = headless ? 0 : m_keyboardState[mappings[i]];
 #endif
 	}
 
-#ifdef WIN32
+#if defined(_MSC_VER)
 	for (unsigned char k = 0; k < 220; k++) {
 
 		if (m_keyboardState_last[k] != m_keyboardState[k]) {
@@ -644,7 +644,7 @@ void SimInput::SetMapping(int index, int code) {
 
 void SimInput::CleanUp() {
 
-#ifdef WIN32
+#if defined(_MSC_VER)
 	// Release keyboard
 	if (m_keyboard) { m_keyboard->Unacquire(); m_keyboard->Release(); m_keyboard = 0; }
 	// Release direct input
