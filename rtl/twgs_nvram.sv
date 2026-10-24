@@ -21,11 +21,10 @@
 //   read mode (twgs.s:269-283). So a READ command lands here as op 111, not
 //   110 — we decode 111 as READ. (Writes use a clean 8-bit send -> op 011.)
 //
-// STORE/RECALL are no-ops: this model's array IS the persistent store (there is
-// no separate RAM/EEPROM shadow). Pre-seeded at power-on with a VALID config so
-// the TWGS ROM's boot path short-circuits (word6=$AE => skip all diagnostics /
-// intro, twgs.s:638 NVRAM_Active_Check) and the jump-table speed queries
-// (GetMaxSpeed etc.) return a sane value WITHOUT the boot ROM ever running.
+// Separate working RAM and saved EEPROM images implement STORE/RECALL. The
+// firmware saves settings before its destructive NVRAM test and recalls them
+// afterward. Transfers are immediate here; EEPROM electrical timing is not
+// modeled. Both images start invalid, so firmware initializes the first boot.
 //
 // Clock-enable friendly. data_stb / ctrl_wr_stb must be ONE pulse per CPU
 // access to $BC4000 / $BC4001 respectively (gate with phi2 in the caller).
@@ -65,7 +64,7 @@ module twgs_nvram (
     output wire       snd_en
 );
 
-  // ---- 16 x 16-bit store ---------------------------------------------------
+  // ---- 16 x 16-bit working RAM and saved EEPROM ----------------------------
   // Powers up ZERO = INVALID (word0 magic != $AE). With the Tier C reset
   // overlay the firmware itself initializes NVRAM on first boot (diagnostics +
   // startup intro + speed measurement -> NVRAM_Validate writes the $AE magic),
@@ -73,10 +72,15 @@ module twgs_nvram (
   // pre-seed (which existed to short-circuit a boot that could never run) is
   // obsolete.
   reg [15:0] mem [0:15];
+  reg [15:0] saved [0:15];
   integer i;
   initial begin
-    for (i = 0; i < 16; i = i + 1) mem[i] = 16'h0000;
+    for (i = 0; i < 16; i = i + 1) begin
+      mem[i] = 16'h0000;
+      saved[i] = 16'h0000;
+    end
   end
+  integer transfer_word;
 
   localparam [1:0] S_IDLE = 2'd0, S_CMD = 2'd1, S_WR = 2'd2, S_RD = 2'd3;
 
@@ -139,7 +143,20 @@ module twgs_nvram (
                               shiftout <= mem[cmd_final[6:3]][7:0]; end
                 3'b100: begin we_en <= 1'b1; state <= S_IDLE;             end // WREN
                 3'b000: begin we_en <= 1'b0; state <= S_IDLE;             end // WRDI
-                default:      state <= S_IDLE;                                // STORE/RECALL: no-op
+                3'b001: begin                                               // STORE RAM -> EEPROM
+                  if (we_en) begin
+                    for (transfer_word = 0; transfer_word < 16; transfer_word = transfer_word + 1)
+                      saved[transfer_word] <= mem[transfer_word];
+                    we_en <= 1'b0; // A completed store clears write enable.
+                  end
+                  state <= S_IDLE;
+                end
+                3'b101: begin                                               // RECALL EEPROM -> RAM
+                  for (transfer_word = 0; transfer_word < 16; transfer_word = transfer_word + 1)
+                    mem[transfer_word] <= saved[transfer_word];
+                  state <= S_IDLE;
+                end
+                default:      state <= S_IDLE;
               endcase
             end
           end
@@ -177,11 +194,17 @@ module twgs_nvram (
       if (host_gfx_en != gfx_prev) mem[2][2] <= host_gfx_en;
       if (host_snd_en != snd_prev) mem[2][3] <= host_snd_en;
 
-      // Backup load (SD -> mem): last in the block so it wins over a
-      // same-cycle serial write (loads happen at mount/OSD time).
+      // Preserve the 32-byte live-RAM backup format. Load both images so a
+      // subsequent firmware RECALL retains the loaded settings. Last in the
+      // block, each loaded byte wins over a same-cycle serial transfer.
       if (bk_wr) begin
-        if (bk_addr[0]) mem[bk_addr[4:1]][15:8] <= bk_data;
-        else            mem[bk_addr[4:1]][7:0]  <= bk_data;
+        if (bk_addr[0]) begin
+          mem[bk_addr[4:1]][15:8] <= bk_data;
+          saved[bk_addr[4:1]][15:8] <= bk_data;
+        end else begin
+          mem[bk_addr[4:1]][7:0] <= bk_data;
+          saved[bk_addr[4:1]][7:0] <= bk_data;
+        end
       end
     end
   end
